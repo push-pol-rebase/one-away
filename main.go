@@ -7,8 +7,16 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/kjk/betterguid"
 )
+
+type Games struct {
+	games map[string]*GameState
+	*sync.RWMutex
+}
 
 type GameState struct {
 	Tiles          []Tile
@@ -30,7 +38,10 @@ type Tile struct {
 
 func main() {
 
-	gameState := initializeGame()
+	games := Games{
+		games:   make(map[string]*GameState),
+		RWMutex: &sync.RWMutex{},
+	}
 
 	// Define custom template functions
 	funcMap := template.FuncMap{
@@ -244,54 +255,39 @@ func main() {
             <button class="button submit-button" hx-post="/submit" hx-target="body" hx-swap="innerHTML">Submit</button>
         </div>
     </div>
-    <script>
-    function toggleSelect(element) {
-      element.classList.toggle('selected');
-    }
-   
-    function shuffle() {
-      const grid = document.getElementById('gameGrid');
-      for (let i = grid.children.length; i >= 0; i--) {
-        grid.appendChild(grid.children[Math.random() * i | 0]);
-      }
-    }
-   
-    function deselectAll() {
-      const selectedTiles = document.querySelectorAll('.selected');
-      selectedTiles.forEach(tile => {
-        tile.classList.remove('selected');
-      });
-    }
-   
-    function submit() {
-      const selectedTiles = document.querySelectorAll('.selected');
-      if (selectedTiles.length !== 4) {
-        alert('Please select exactly 4 tiles before submitting.');
-        return;
-      }
-      // In a real game, we'd check if the selection is correct here
-      // For demo purposes, we'll just deselect all tiles
-      deselectAll();
-    }
   </script>
 </body>
 </html>
 `))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		gameState := getAndSetCookie(games, w, r)
+
 		if err := tmpl.Execute(w, gameState); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 
 	http.HandleFunc("/select-tile", func(w http.ResponseWriter, r *http.Request) {
+		gameState := getAndSetCookie(games, w, r)
+
 		id := r.FormValue("id")
 		tileID := 0
 		fmt.Sscanf(id, "%d", &tileID)
 
+		count := 0
+		for _, v := range gameState.Tiles {
+			if v.Selected {
+				count++
+			}
+		}
+
 		// Toggle selection
 		for i := range gameState.Tiles {
 			if gameState.Tiles[i].ID == tileID {
+				if !gameState.Tiles[i].Selected && count >= 4 {
+					break
+				}
 				gameState.Tiles[i].Selected = !gameState.Tiles[i].Selected
 				break
 			}
@@ -300,7 +296,7 @@ func main() {
 		// Update selected tiles list
 		gameState.SelectedTiles = []int{}
 		for _, tile := range gameState.Tiles {
-			if tile.Selected && len(gameState.SelectedTiles) < 5 {
+			if tile.Selected {
 				gameState.SelectedTiles = append(gameState.SelectedTiles, tile.ID)
 			}
 		}
@@ -311,6 +307,8 @@ func main() {
 	})
 
 	http.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
+		gameState := getAndSetCookie(games, w, r)
+
 		selectedTiles := []Tile{}
 		selectedWords := []string{}
 
@@ -384,12 +382,26 @@ func main() {
 			}
 		}
 
+		unsolvedTiles := []Tile{}
+		solvedTiles := []Tile{}
+
+		for _, tile := range gameState.Tiles {
+			if tile.GroupID == 0 {
+				unsolvedTiles = append(unsolvedTiles, tile)
+			} else {
+				solvedTiles = append(solvedTiles, tile)
+			}
+		}
+
+		gameState.Tiles = append(solvedTiles, unsolvedTiles...)
+
 		if err := tmpl.Execute(w, gameState); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 
 	http.HandleFunc("/shuffle", func(w http.ResponseWriter, r *http.Request) {
+		gameState := getAndSetCookie(games, w, r)
 		// Only shuffle tiles that aren't part of a solved group
 		unsolvedTiles := []Tile{}
 		solvedTiles := []Tile{}
@@ -408,7 +420,7 @@ func main() {
 		})
 
 		// Combine back together
-		gameState.Tiles = append(unsolvedTiles, solvedTiles...)
+		gameState.Tiles = append(solvedTiles, unsolvedTiles...)
 
 		if err := tmpl.Execute(w, gameState); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -416,6 +428,9 @@ func main() {
 	})
 
 	http.HandleFunc("/deselect-all", func(w http.ResponseWriter, r *http.Request) {
+
+		gameState := getAndSetCookie(games, w, r)
+
 		for i := range gameState.Tiles {
 			gameState.Tiles[i].Selected = false
 		}
@@ -432,18 +447,18 @@ func main() {
 
 func initializeGame() *GameState {
 	correctGroups := [][]string{
-		{"A", "B", "C", "D"},
-		{"E", "F", "G", "H"},
-		{"I", "J", "K", "L"},
-		{"M", "N", "O", "N"},
+		{"RC CARS", "COFFEE", "BOWLING", "LINDSAY"},
+		{"DINOSAUR", "RIDE THE BUS", "VAPE", "STATISTICALLY"},
+		{"THE GAY EAR?", "PEANUTS", "LINDSAY'S MOM", "HOG"},
+		{"HOW TO MAKE A FIRE", "PAUL's JOB", "AWS", "MAO"},
 	}
 
 	// Create tiles
 	allWords := []string{
-		"A", "B", "C", "D",
-		"E", "F", "G", "H",
-		"I", "J", "K", "L",
-		"M", "N", "O", "N",
+		"HOG", "RC CARS", "STATISTICALLY", "COFFEE",
+		"DINOSAUR", "THE GAY EAR?", "PEANUTS", "PAUL'S JOB",
+		"AWS", "LINDSAY", "HOW TO MAKE A FIRE", "RIDE THE BUS",
+		"VAPE", "MAO", "LINDSAY'S MOM", "BOWLING",
 	}
 
 	var tiles []Tile
@@ -505,4 +520,35 @@ func containsSameElements(a, b []string) bool {
 	}
 
 	return true
+}
+
+func getAndSetCookie(state Games, w http.ResponseWriter, r *http.Request) *GameState {
+
+	cookie, err := r.Cookie("token")
+	if err == nil {
+		state.RWMutex.RLock()
+		game, ok := state.games[cookie.Value]
+		state.RWMutex.RUnlock()
+		if ok {
+			return game
+		}
+	}
+
+	id := betterguid.New()
+
+	state.RWMutex.Lock()
+	game := initializeGame()
+	state.games[id] = game
+	state.RWMutex.Unlock()
+
+	cookie = &http.Cookie{
+		Name:     "token",
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false,
+		Expires:  time.Now().Add(1 * time.Hour),
+	}
+	http.SetCookie(w, cookie)
+	return game
 }
